@@ -1,0 +1,390 @@
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(UCell)
+library(ggplot2)
+library(monocle3)
+library(magrittr)
+library(SCopeLoomR)
+
+#subset only ECs from WT and CKO 
+WT_CKO <- readRDS("~/R/WT_CKO.rds")
+Tie2_EC <- subset(WT_CKO, idents =c("EC"))
+DefaultAssay(Tie2_EC) <- "integrated"
+
+Tie2_EC <- FindVariableFeatures(object = Tie2_EC, selection.method = "vst", nfeatures = 2000)
+Tie2_EC <- ScaleData(object = Tie2_EC, verbose = FALSE)
+Tie2_EC <- RunPCA(object = Tie2_EC, npcs = 6, verbose = FALSE)
+Tie2_EC <- RunUMAP(Tie2_EC, reduction = "pca", dims = 1:5)
+Tie2_EC <- RunTSNE(Tie2_EC, dims = 1:5, method = "FIt-SNE")
+Tie2_EC <- FindNeighbors(Tie2_EC, reduction = "pca", dims = 1:5)
+Tie2_EC <- FindClusters(Tie2_EC, resolution = 0.06)
+DimPlot(Tie2_EC, reduction = "umap", label = TRUE)
+DimPlot(Tie2_EC, reduction = "umap", label = TRUE, split.by = "orig.ident", pt =0.5)
+DimPlot(Tie2_EC, reduction = "tsne", label = TRUE, split.by = "orig.ident")
+
+Tie2_EC$orig.ident <- factor(Tie2_EC$orig.ident, levels = c("WT","CKO"))
+
+Tie2_EC.propotion <- prop.table(table(Idents(Tie2_EC), Tie2_EC$orig.ident))
+write.csv(Tie2_EC.propotion, file = "~/R/Tie2_EC.propotion.csv")
+
+DefaultAssay(Tie2_EC) <- "RNA"
+
+Tie2_EC.markers <- FindAllMarkers(Tie2_EC, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+write.csv(Tie2_EC.markers, file = "~/R/Tie2_EC.markers.csv")
+
+markers_EC <- list()
+markers_EC$Artery <- c("Cxcl12", "Tm4sf1", "Depp1", "Gja4",	"Sparcl1", "Hey1",	"Sparc",	"Gja5")
+markers_EC$gCapillary <- c("Aplnr",	"Plvap",	"Gpihbp1",	"Socs3",	"Cd93", "Sema3c")
+markers_EC$Vein <- c("Prss23",	"Slc6a2",	"Vwf",	"Cd200",	"Bgn",	"Ackr3",	"Lyve1",	"Tmem252",	"Amigo2",	"Vcam1")
+markers_EC$aCapillary <- c("Chst1",	"Tbx2",	"Car4",	"Igfbp7",	"Fibin",	"Ednrb",	"Tbx2",	"Cdkn2b",	"Ptprb")
+
+Tie2_EC<- AddModuleScore_UCell(Tie2_EC, features = markers_EC)
+signature.names <- paste0(names(markers_EC), "_UCell")
+
+VlnPlot(Tie2_EC, features = signature.names, group.by = "seurat_clusters", pt =0)
+
+VlnPlot(Tie2_EC, features = c("Cdh5", "Car4", "Cxcl12", "Plvap", "Vwf", "Sparcl1", "Mecom","Tm4sf1"), ncol = 2, pt.size = 0)
+Tie2_EC <- RenameIdents(Tie2_EC, '0' = "gCap", '1' = "ArtEC", '2' = "aCap",  '3' = "VeinEC")
+Tie2_EC$Celltype <- Idents(Tie2_EC)
+Tie2_EC <- ScaleData(object = Tie2_EC, verbose = FALSE)
+top10 <- Tie2_EC.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+DoHeatmap(Tie2_EC, features = top10$gene) + NoLegend()
+saveRDS(Tie2_EC, file = "~/R/Tie2_EC.rds")
+
+#proportion
+cell.prop<-as.data.frame(prop.table(table(Idents(Tie2_EC), Tie2_EC$orig.ident)))
+colnames(cell.prop)<-c("cluster","orig.ident","proportion")
+ggplot(cell.prop,aes(orig.ident,proportion,fill=cluster)) + geom_bar(stat="identity",position="fill") + ggtitle("") + theme_bw() + theme(axis.ticks.length=unit(0.5,'cm')) + guides(fill=guide_legend(title=NULL))
+write.csv(cell.prop, file = "~/R/Tie2_EC.propotion.csv")
+
+#Monocle3
+cds <- as.cell_data_set(Tie2_EC)
+#cds <- preprocess_cds(cds, num_dim = 5)
+#cds <- reduce_dimension(cds)
+cds <- cluster_cells(cds, resolution = 0.00075)
+cds <- learn_graph(cds)
+plot_cells(cds)
+
+plot_cells(cds, color_cells_by = "partition")
+gg1 <- DimPlot(Tie2_EC, reduction = "umap", label = TRUE)
+gg2 <- plot_cells(cds)
+gg1+gg2
+gg1 <- DimPlot(Tie2_EC, reduction = "umap",split.by = "orig.ident", label = FALSE)
+
+plot_cells(cds, color_cells_by = "partition", show_trajectory_graph = FALSE)
+
+integrated.sub <- as.Seurat(cds,assay = NULL)
+cds <- as.cell_data_set(integrated.sub)
+cds <- learn_graph(cds)
+plot_cells(cds, label_groups_by_cluster = FALSE, label_leaves = FALSE, label_branch_points = FALSE)
+
+max.Sox17 <- which.max(unlist(FetchData(integrated.sub, "Sox17")))
+max.Sox17 <- colnames(integrated.sub)[max.Sox17]
+cds <- order_cells(cds, root_cells = max.Sox17)
+
+plot_cells(cds, color_cells_by = "pseudotime", label_cell_groups = FALSE, label_leaves = FALSE, 
+           label_branch_points = FALSE)
+
+#SCENIC
+getwd()
+setwd("~/R/SCENIC")
+
+library(SCopeLoomR)
+exprMat  <-  as.matrix(Tie2_EC@assays$RNA@data)
+#dim(exprMat)
+
+head(Tie2_EC)
+cellInfo <-  Tie2_EC@meta.data[,c(3,2,1,21)]
+colnames(cellInfo)=c( 'nGene' ,'nUMI','Group','CellType')
+head(cellInfo)
+table(cellInfo$CellType)
+saveRDS(cellInfo, file="int/cellInfo.Rds")
+
+library(SCENIC)
+
+org <- "mgi"
+#dir.create("cisTarget_databases"); setwd("cisTarget_databases")
+dbDir <- "~/R"
+myDatasetTitle <- "SCENIC"
+data(defaultDbNames)
+dbs <- defaultDbNames[[org]]
+scenicOptions <- initializeScenic(org=org, dbDir=dbDir, dbs=dbs, datasetTitle=myDatasetTitle, nCores=1) 
+
+scenicOptions@inputDatasetInfo$cellInfo <- "int/cellInfo.Rds"
+scenicOptions@inputDatasetInfo$colVars <- "int/colVars.Rds"
+
+genesKept <- geneFiltering(exprMat, scenicOptions=scenicOptions,
+                           minCountsPerGene=10*.05*ncol(exprMat),
+                           minSamples=ncol(exprMat)*.05)
+
+#genesKept <- geneFiltering(exprMat, scenicOptions=scenicOptions,minCountsPerGene=10*.05*ncol(exprMat),#minSamples=ncol(exprMat)*.05), TF 99, finally 26 TF, 1053 genes
+
+exprMat_filtered <- exprMat[genesKept, ]
+dim(exprMat_filtered) 
+
+rm(exprMat) # close exprMat
+
+runCorrelation(exprMat_filtered, scenicOptions)
+saveRDS(scenicOptions, file="int/scenicOptions.Rds")
+
+exprMat_filtered <- log2(exprMat_filtered+1) 
+runGenie3(exprMat_filtered, scenicOptions) # take days to run
+saveRDS(scenicOptions, file="int/scenicOptions.Rds")
+exprMat_log <- log2(exprMat+1)# if not log normalized.
+rm(exprMat) # close exprMat
+
+#scenicOptions <- readRDS("int/scenicOptions.Rds")
+
+scenicOptions@settings$verbose <- TRUE
+scenicOptions@settings$nCores <- 10
+scenicOptions@settings$seed <- 123
+
+#scenicOptions@settings$dbs <- scenicOptions@settings$dbs["10kb"]
+scenicOptions@settings$dbs <- scenicOptions@settings$dbs
+scenicOptions <- runSCENIC_1_coexNetwork2modules(scenicOptions)
+#scenicOptions <- runSCENIC_2_createRegulons(scenicOptions, coexMethod=c("top5perTarget"))
+scenicOptions <- runSCENIC_2_createRegulons(scenicOptions) 
+library(foreach)
+scenicOptions <- runSCENIC_3_scoreCells(scenicOptions, exprMat_log)
+saveRDS(scenicOptions, file="int/scenicOptions.Rds")
+
+
+aucellApp <- plotTsne_AUCellApp(scenicOptions, exprMat_log)
+savedSelections <- shiny::runApp(aucellApp)# determine the threshold for each TF
+
+# Save the modified thresholds:
+newThresholds <- savedSelections$thresholds
+scenicOptions@fileNames$int["aucell_thresholds",1] <- "int/newThresholds.Rds"
+saveRDS(newThresholds, file=getIntName(scenicOptions, "aucell_thresholds"))
+saveRDS(scenicOptions, file="int/scenicOptions.Rds") 
+
+scenicOptions <- runSCENIC_4_aucell_binarize(scenicOptions)
+tsneAUC(scenicOptions, aucType="AUC")
+
+scenicOptions@fileNames$output["loomFile",] <- "SCENIC.loom"
+export2loom(scenicOptions, exprMat)
+
+regulonAUC <- loadInt(scenicOptions, "aucell_regulonAUC")
+rss <- calcRSS(AUC=getAUC(regulonAUC), cellAnnotation=cellInfo[colnames(regulonAUC), "CellType"], )
+rssPlot <- plotRSS(rss)
+plotly::ggplotly(rssPlot$plot)
+
+#Projection the AUC and TF expression onto t-SNEs
+aucellApp <- plotTsne_AUCellApp(scenicOptions, exprMat_log) # default t-SNE
+savedSelections <- shiny::runApp(aucellApp)
+print(tsneFileName(scenicOptions))
+tSNE_scenic <- readRDS(tsneFileName(scenicOptions))
+aucell_regulonAUC <- loadInt(scenicOptions, "aucell_regulonAUC")
+par(mfrow=c(1,3))
+AUCell::AUCell_plotTSNE(tSNE_scenic$Y, exprMat, aucell_regulonAUC[onlyNonDuplicatedExtended(rownames(aucell_regulonAUC))[c("Sox17", "Foxp1", "Hes1")],], plots="Expression")
+
+#par(bg = "black")
+par(mfrow=c(1,2))
+
+regulonNames <- c( "Sox17", "Foxp1")
+cellCol <- plotEmb_rgb(scenicOptions,regulonNames, aucType = "Binary",aucMaxContrast = 1,offColor = "lightgray",showLegend = F)
+
+regulonNames <- list(red=c("Sox17", "Klf2"),
+                     green=c("Klf4"),
+                     blue=c( "Foxp1"))
+cellCol <- plotTsne_rgb(scenicOptions, regulonNames, aucType="Binary")
+
+#Average Regulon Activity by cluster
+regulonAUC <- loadInt(scenicOptions, "aucell_regulonAUC")
+regulonAUC <- regulonAUC[onlyNonDuplicatedExtended(rownames(regulonAUC)),]
+regulonActivity_byCellType <- sapply(split(rownames(cellInfo), cellInfo$CellType),
+                                     function(cells) rowMeans(getAUC(regulonAUC)[,cells]))
+regulonActivity_byCellType_Scaled <- t(scale(t(regulonActivity_byCellType), center = T, scale=T))
+
+ComplexHeatmap::Heatmap(regulonActivity_byCellType_Scaled, name="Regulon activity")
+
+#WT, CKO and EH2
+# subset EC only for EH2, WT and CKO
+Idents(Phd_tie2_EH2) <- "MergeCell"
+Phd_tie2_EH2_EC <- subset(Phd_tie2_EH2, idents = c("EC"))
+DefaultAssay(object = Phd_tie2_EH2_EC) <- "integrated"
+Phd_tie2_EH2_EC <- FindVariableFeatures(object = Phd_tie2_EH2_EC, selection.method = "vst", nfeatures = 2000)
+Phd_tie2_EH2_EC <- ScaleData(object = Phd_tie2_EH2_EC, verbose = FALSE)
+Phd_tie2_EH2_EC <- RunPCA(object = Phd_tie2_EH2_EC, npcs = 10, verbose = FALSE)
+ElbowPlot(Phd_tie2_EH2_EC)
+Phd_tie2_EH2_EC <- RunUMAP(Phd_tie2_EH2_EC, reduction = "pca", dims = 1:5)
+Phd_tie2_EH2_EC <- FindNeighbors(Phd_tie2_EH2_EC, reduction = "pca", dims = 1:5)
+Phd_tie2_EH2_EC <- FindClusters(Phd_tie2_EH2_EC, resolution = 0.1)
+DimPlot(Phd_tie2_EH2_EC, reduction = "umap", label = TRUE, split.by = "newid", ncol = 4)
+DimPlot(Phd_tie2_EH2_EC, reduction = "umap")
+DimPlot(Phd_tie2_EH2_EC, reduction = "tsne")
+
+saveRDS(Phd_tie2_EH2_EC, file = "~/R/Phd_tie2_EH2_EC.rds")
+
+DefaultAssay(Phd_tie2_EH2_EC) <- "RNA"
+markers.to.plot <- c("Cdh5", "Car4", "Cxcl12", "Plvap", "Vwf", "Sparcl1", "Mecom","Tm4sf1", "Prox1")
+DotPlot(Phd_tie2_EH2_EC, features = rev(markers.to.plot), cols = c("blue", "red"), dot.scale = 8) + RotatedAxis()
+
+Phd_tie2_EH2_EC.markers <- FindAllMarkers(Phd_tie2_EH2_EC, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+write.csv(Phd_tie2_EH2_EC.markers, file = "~/R/Phd_tie2_EH2_EC.markers.csv")
+
+top10 <- Phd_tie2_EH2_EC.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+DoHeatmap(Phd_tie2_EH2_EC, features = top10$gene) + NoLegend()
+
+
+Phd_tie2_EH2_EC<- AddModuleScore_UCell(Phd_tie2_EH2_EC, features = markers_EC)
+
+signature.names <- paste0(names(markers_EC), "_UCell")
+
+VlnPlot(Phd_tie2_EH2_EC, features = signature.names, group.by = "seurat_clusters")
+
+VlnPlot(Phd_tie2_EH2_EC, features = c("Cdh5", "Car4", "Cxcl12", "Plvap", "Vwf", "Sparcl1", "Mecom","Tm4sf1"), ncol = 2, pt.size = 0)
+DimPlot(Phd_tie2_EH2_EC, reduction = "umap", label = TRUE, split.by = "newid", ncol = 4)
+DimPlot(Phd_tie2_EH2_EC, reduction = "umap", label = FALSE, split.by = "newid", ncol = 4)
+
+Phd_tie2_EH2_EC<- RenameIdents(Phd_tie2_EH2_EC, '0' = "gCap", '1' = "gCap", '2' = "ArtEC", '3' = "ArtEC",'4' = "aCap",  '5' = "VenEC")
+Phd_tie2_EH2_EC$Celltype <- Idents(Phd_tie2_EH2_EC)
+saveRDS(Phd_tie2_EH2_EC, file = "~/R/Phd_tie2_EH2_EC.rds")
+
+cell.prop<-as.data.frame(prop.table(table(Idents(Phd_tie2_EH2_EC), Phd_tie2_EH2_EC$newid)))
+colnames(cell.prop)<-c("cluster","orig.ident","proportion")
+ggplot(cell.prop,aes(orig.ident,proportion,fill=cluster)) + geom_bar(stat="identity",position="fill") + ggtitle("") + theme_bw() + theme(axis.ticks.length=unit(0.5,'cm')) + guides(fill=guide_legend(title=NULL))
+
+
+#Visium data
+WT_visium.data <- Load10X_Spatial(data.dir = "~/R/Visium/WT/", slice = "WT")
+CKO_visium.data <- Load10X_Spatial(data.dir = "~/R/Visium/CKO/", slice = "CKO")
+
+plot1 <- VlnPlot(WT_visium.data, features = "nCount_Spatial", pt.size = 0.1) + NoLegend()
+plot2 <- SpatialFeaturePlot(WT_visium.data, features = "nCount_Spatial") + theme(legend.position = "right")
+wrap_plots(plot1, plot2)
+
+plot1 <- VlnPlot(CKO_visium.data, features = "nCount_Spatial", pt.size = 0.1) + NoLegend()
+plot2 <- SpatialFeaturePlot(CKO_visium.data, features = "nCount_Spatial") + theme(legend.position = "right")
+wrap_plots(plot1, plot2)
+
+WT_visium.data <- SCTransform(WT_visium.data, assay = "Spatial", verbose = FALSE)
+CKO_visium.data <- SCTransform(CKO_visium.data, assay = "Spatial", verbose = FALSE)
+
+SpatialFeaturePlot(WT_visium.data, features = c("Epas1", "Cdh5", "Myh11"))
+SpatialFeaturePlot(CKO_visium.data, features = c("Prox1", "Cdh5"))
+
+p1 <- SpatialFeaturePlot(WT_visium.data, features = "Cxcl12", pt.size.factor = 1)
+p2 <- SpatialFeaturePlot(WT_visium.data, features = "Cxcl12", alpha = c(0.1, 1))
+p1 + p2
+
+p1 <- SpatialFeaturePlot(CKO_visium.data, features = "Cxcl12", pt.size.factor = 1)
+p2 <- SpatialFeaturePlot(CKO_visium.data, features = "Cxcl12", alpha = c(0.1, 1))
+p1 + p2
+
+WT_visium.data <- RunPCA(WT_visium.data, assay = "SCT", verbose = FALSE)
+WT_visium.data <- FindNeighbors(WT_visium.data, reduction = "pca", dims = 1:30)
+WT_visium.data <- FindClusters(WT_visium.data, verbose = FALSE)
+WT_visium.data <- RunUMAP(WT_visium.data, reduction = "pca", dims = 1:30)
+
+CKO_visium.data <- RunPCA(CKO_visium.data, assay = "SCT", verbose = FALSE)
+CKO_visium.data <- FindNeighbors(CKO_visium.data, reduction = "pca", dims = 1:30)
+CKO_visium.data <- FindClusters(CKO_visium.data, verbose = FALSE)
+CKO_visium.data <- RunUMAP(CKO_visium.data, reduction = "pca", dims = 1:30)
+
+p1 <- DimPlot(WT_visium.data, reduction = "umap", label = TRUE)
+p2 <- SpatialDimPlot(WT_visium.data, label = TRUE, label.size = 3)
+p1 + p2
+
+p1 <- DimPlot(CKO_visium.data, reduction = "umap", label = TRUE)
+p2 <- SpatialDimPlot(CKO_visium.data, label = TRUE, label.size = 3)
+p1 + p2
+
+saveRDS(CKO_visium.data, file = "~/R/Visium/CKO_visium.data.rds")
+saveRDS(WT_visium.data, file = "~/R/Visium/WT_visium.data.rds")
+
+#
+SpatialDimPlot(CKO_visium.data, cells.highlight = CellsByIdentities(object = CKO_visium.data, idents = c(2, 1, 4, 3, 5, 8,6,7,9,10,0)), facet.highlight = TRUE, ncol = 3)
+SpatialDimPlot(CKO_visium.data, interactive = TRUE)
+SpatialFeaturePlot(CKO_visium.data, features = "Spp1", interactive = TRUE)
+LinkedDimPlot(CKO_visium.data)
+
+#Identification of Spatially Variable Features
+de_markers <- FindMarkers(CKO_visium.data, ident.1 = 5, ident.2 = 6)
+CKO_visium.data <- FindSpatiallyVariableFeatures(CKO_visium.data, assay = "SCT", features = VariableFeatures(CKO_visium.data)[1:1000], selection.method = "markvariogram") # take a long time
+SpatialFeaturePlot(object = CKO_visium.data, features = rownames(de_markers)[1:3], alpha = c(0.1, 1), ncol = 3)
+top.features <- head(SpatiallyVariableFeatures(CKO_visium.data, selection.method = "markvariogram"), 10)
+SpatialFeaturePlot(CKO_visium.data, features = top.features, ncol = 5, alpha = c(0.1, 1))
+
+WT_visium.data <- FindSpatiallyVariableFeatures(WT_visium.data, assay = "SCT", features = VariableFeatures(WT_visium.data)[1:1000], selection.method = "markvariogram") # take a long time
+CKO_visium.data <- FindSpatiallyVariableFeatures(CKO_visium.data, assay = "SCT", features = VariableFeatures(CKO_visium.data)[1:1000], selection.method = "markvariogram") # take a long time
+
+#Integration with single-cell data
+phd_ref <- readRDS("~/R/WT_CKO.rds")
+DimPlot(phd_ref, reduction = "umap", label = TRUE)
+
+phd_ref <- SCTransform(phd_ref, ncells = 3000, verbose = FALSE) %>%
+  RunPCA(verbose = FALSE) %>%
+  RunUMAP(dims = 1:30)
+
+DimPlot(phd_ref, group.by = "Celltype", label = TRUE)
+
+anchors <- FindTransferAnchors(reference = phd_ref, query = CKO_visium.data, normalization.method = "SCT")
+predictions.assay <- TransferData(anchorset = anchors, refdata = phd_ref$Celltype, prediction.assay = TRUE,
+                                  weight.reduction = CKO_visium.data[["pca"]], dims = 1:30)
+CKO_visium.data[["predictions"]] <- predictions.assay
+DefaultAssay(CKO_visium.data) <- "predictions"
+SpatialFeaturePlot(CKO_visium.data, features = c("ArtEC", "gCap", "AlvFib", "aMac", "iMac", "LEC", "SMC", "Pericyte", "PMN", "Tcell", "AdvFib", "AT2", "AT1", "Bcell", "NK", "Cilliated", "Club"), pt.size.factor = 1.6, ncol = 6, crop = TRUE)
+
+anchors <- FindTransferAnchors(reference = phd_ref, query = WT_visium.data, normalization.method = "SCT")
+predictions.assay <- TransferData(anchorset = anchors, refdata = phd_ref$Celltype, prediction.assay = TRUE,
+                                  weight.reduction = WT_visium.data[["pca"]], dims = 1:30)
+WT_visium.data[["predictions"]] <- predictions.assay
+DefaultAssay(WT_visium.data) <- "predictions"
+SpatialFeaturePlot(WT_visium.data, features = c("ArtEC", "gCap", "aCap","VeEC","AlvFib", "aMac", "iMac", "LEC", "SMC", "Pericyte", "PMN", "Tcell", "AdvFib", "AT2", "AT1", "Bcell", "NK", "Cilliated", "Club"), pt.size.factor = 1.6, ncol = 6, crop = TRUE)
+
+SpatialFeaturePlot(WT_visium.data, features = c("ArtEC", "gCap"), pt.size.factor = 1.6, ncol = 2, crop = TRUE)
+SpatialFeaturePlot(CKO_visium.data, features = c("ArtEC", "gCap"), pt.size.factor = 1.6, ncol = 2, crop = TRUE)
+
+
+#merge
+visum_WT_KO.merge <- merge(WT_visium.data, CKO_visium.data)
+
+DefaultAssay(visum_WT_KO.merge) <- "SCT"
+VariableFeatures(visum_WT_KO.merge) <- c(VariableFeatures(WT_visium.data), VariableFeatures(CKO_visium.data))
+visum_WT_KO.merge 
+visum_WT_KO.merge <- RunPCA(visum_WT_KO.merge, verbose = FALSE)
+visum_WT_KO.merge <- FindNeighbors(visum_WT_KO.merge, dims = 1:30)
+visum_WT_KO.merge <- FindClusters(visum_WT_KO.merge, verbose = FALSE)
+visum_WT_KO.merge <- RunUMAP(visum_WT_KO.merge, dims = 1:30)
+
+DimPlot(visum_WT_KO.merge, reduction = "umap", group.by = c("ident", "orig.ident"))
+
+SpatialDimPlot(visum_WT_KO.merge)
+SpatialFeaturePlot(visum_WT_KO.merge, features = c("Cxcl12"))
+
+DefaultAssay(visum_WT_KO.merge) <- "predictions"
+
+SpatialFeaturePlot(visum_WT_KO.merge, features = c("ArtEC", "gCap"))
+
+saveRDS(visum_WT_KO.merge, file = "~/R/Visium/visum_WT_KO.merge.rds")
+
+#Integration with single-cell data
+
+DimPlot(phd_ref, reduction = "umap", label = TRUE)
+
+phd_ref <- SCTransform(phd_ref, ncells = 3000, verbose = FALSE) %>%
+  RunPCA(verbose = FALSE) %>%
+  RunUMAP(dims = 1:30)
+
+DimPlot(phd_ref, group.by = "Celltype", label = TRUE)
+
+anchors <- FindTransferAnchors(reference = phd_ref, query = visum_WT_KO.merge, normalization.method = "SCT")
+predictions.assay <- TransferData(anchorset = anchors, refdata = phd_ref$Celltype, prediction.assay = TRUE,
+                                  weight.reduction = visum_WT_KO.merge[["pca"]], dims = 1:30)
+visum_WT_KO.merge[["predictions"]] <- predictions.assay
+DefaultAssay(visum_WT_KO.merge) <- "predictions"
+SpatialFeaturePlot(visum_WT_KO.merge, features = c("ArtEC", "gCap", "AlvFib", "aMac", "iMac", "LEC", "SMC", "Pericyte", "PMN", "Tcell", "AdvFib", "AT2", "AT1", "Bcell", "NK", "Cilliated", "Club"), pt.size.factor = 1.6, ncol = 6, crop = TRUE)
+
+SpatialFeaturePlot(visum_WT_KO.merge, features = c("ArtEC", "gCap"), pt.size.factor = 1.6, ncol = 2, crop = TRUE)
+
+DefaultAssay(visum_WT_KO.merge) <- "Spatial"
+SpatialFeaturePlot(visum_WT_KO.merge, features = c("Cxcl12", "Sparcl1"), ncol = 2)
+SpatialFeaturePlot(visum_WT_KO.merge, features = c("Car4", "Ednrb"), ncol = 2)
+SpatialFeaturePlot(visum_WT_KO.merge, features = c("Gpihbp1", "Plvap"), ncol = 2)
+SpatialFeaturePlot(visum_WT_KO.merge, features = c("Pecam1", "Cdh5"), ncol = 2)
+
+visum_WT_KO.merge <- FindSpatiallyVariableFeatures(visum_WT_KO.merge, assay = "SCT", features = VariableFeatures(visum_WT_KO.merge)[1:1000], selection.method = "markvariogram") # take a long time
+
